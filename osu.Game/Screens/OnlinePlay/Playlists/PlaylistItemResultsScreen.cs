@@ -93,6 +93,13 @@ namespace osu.Game.Screens.OnlinePlay.Playlists
 
         protected abstract APIRequest<MultiplayerScore> CreateScoreRequest();
 
+        /// <summary>
+        /// Creates a request to retrieve the best score of the user who set the given score.
+        /// </summary>
+        /// <param name="score">The score retrieved from <see cref="CreateScoreRequest"/>.</param>
+        /// <returns>The request, or <c>null</c> if the given score is known to be the user's best.</returns>
+        protected virtual APIRequest<MultiplayerScore>? CreateUserBestScoreRequest(MultiplayerScore score) => null;
+
         protected override async Task<ScoreInfo[]> FetchScores()
         {
             // This performs two requests:
@@ -119,8 +126,16 @@ namespace osu.Game.Screens.OnlinePlay.Playlists
 
                 if (userScore.ScoresAround?.Higher != null)
                 {
-                    allScores.AddRange(userScore.ScoresAround.Higher.Scores);
                     higherScores = userScore.ScoresAround.Higher;
+
+                    // The surrounding scores never include any scores set by the user who set the given score,
+                    // but the user's best score is still counted towards the position of the given score.
+                    // If the given score isn't the user's best, the best has to be added back in to display it and to avoid leaving a gap in the positions.
+                    var userBestScore = await fetchUserBestScore(userScore).ConfigureAwait(false);
+                    if (userBestScore != null)
+                        insertUserBestScore(higherScores, userScore, userBestScore);
+
+                    allScores.AddRange(higherScores.Scores);
 
                     Debug.Assert(userScore.Position != null);
                     setPositions(higherScores, userScore.Position.Value, -1);
@@ -161,6 +176,55 @@ namespace osu.Game.Screens.OnlinePlay.Playlists
 
             return await fetchScoresAround(pivot).ConfigureAwait(false);
         }
+
+        private async Task<MultiplayerScore?> fetchUserBestScore(MultiplayerScore score)
+        {
+            var userBestReq = CreateUserBestScoreRequest(score);
+            if (userBestReq == null)
+                return null;
+
+            var requestTaskSource = new TaskCompletionSource<MultiplayerScore>();
+            userBestReq.Success += requestTaskSource.SetResult;
+            userBestReq.Failure += requestTaskSource.SetException;
+            API.Queue(userBestReq);
+
+            try
+            {
+                return await requestTaskSource.Task.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"Failed to fetch user best score (room: {RoomId}, item: {PlaylistItem.ID}): {ex}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Inserts the user's best score into the scores higher than the given score, if it should be displayed among them.
+        /// </summary>
+        /// <param name="higherScores">The scores higher than <paramref name="score"/>, ordered from closest to furthest.</param>
+        /// <param name="score">The given score.</param>
+        /// <param name="userBestScore">The best score of the user who set <paramref name="score"/>.</param>
+        private static void insertUserBestScore(MultiplayerScores higherScores, MultiplayerScore score, MultiplayerScore userBestScore)
+        {
+            // The best score may also be lower if the given score was only just set and hasn't been processed as the user's best yet.
+            if (userBestScore.ID == score.ID || !ranksAbove(userBestScore, score))
+                return;
+
+            int index = higherScores.Scores.TakeWhile(s => ranksAbove(userBestScore, s)).Count();
+
+            // If the best score is beyond the retrieved scores, it'll be retrieved along with the next page instead.
+            if (index == higherScores.Scores.Count && higherScores.Cursor != null)
+                return;
+
+            higherScores.Scores.Insert(index, userBestScore);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="a"/> ranks above <paramref name="b"/>, matching the ordering used by osu-web.
+        /// </summary>
+        private static bool ranksAbove(MultiplayerScore a, MultiplayerScore b)
+            => a.TotalScore > b.TotalScore || (a.TotalScore == b.TotalScore && a.ID < b.ID);
 
         /// <summary>
         /// Creates a <see cref="IndexPlaylistScoresRequest"/> with an optional score pivot.

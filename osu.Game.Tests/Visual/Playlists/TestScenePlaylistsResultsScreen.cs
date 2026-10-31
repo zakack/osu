@@ -297,6 +297,83 @@ namespace osu.Game.Tests.Visual.Playlists
                 resultsScreen.ChildrenOfType<LoadingSpinner>().Single(l => l.Anchor == Anchor.CentreRight).State.Value == Visibility.Hidden);
         }
 
+        /// <summary>
+        /// The user's best score ranks among the scores higher than the presented score, but the server never includes it among them.
+        /// </summary>
+        [Test]
+        public void TestUserBestDisplayedAmongHigherScores()
+        {
+            const int user_best_id = 1000;
+
+            AddStep("bind handler with better user best", () =>
+            {
+                // 10 higher scores plus the user's best.
+                userScore.Position = 12;
+
+                bindHandler(userScore: userScore, userBestScore: new MultiplayerScore
+                {
+                    ID = user_best_id,
+                    TotalScore = 25,
+                    Accuracy = userScore.Accuracy,
+                    Passed = true,
+                    Rank = userScore.Rank,
+                    MaxCombo = userScore.MaxCombo,
+                    BeatmapId = RNG.Next(0, 7),
+                    User = userScore.User,
+                }, modifyUserResponse: response =>
+                {
+                    var higher = response.ScoresAround!.Higher!;
+
+                    // Place the user's best between the second and third closest higher scores.
+                    for (int i = 0; i < higher.Scores.Count; i++)
+                        higher.Scores[i].TotalScore = (i + 1) * 10;
+
+                    higher.Cursor = null;
+                });
+
+                totalCount++;
+            });
+
+            createResultsWithScore(() => userScore);
+            waitForDisplay();
+
+            AddAssert("user score selected", () => this.ChildrenOfType<ScorePanel>().Single(p => p.Score.OnlineID == userScore.OnlineID).State == PanelState.Expanded);
+            AddAssert("user score position is 12", () => this.ChildrenOfType<ScorePanel>().Single(p => p.Score.OnlineID == userScore.OnlineID).ScorePosition.Value, () => Is.EqualTo(12));
+            AddAssert("user best position is 9", () => this.ChildrenOfType<ScorePanel>().Single(p => p.Score.OnlineID == user_best_id).ScorePosition.Value, () => Is.EqualTo(9));
+            AddAssert("higher positions have no gaps", () => this.ChildrenOfType<ScorePanel>()
+                                                                 .Where(p => p.Score.OnlineID <= 0 || p.Score.OnlineID == user_best_id)
+                                                                 .Select(p => p.ScorePosition.Value)
+                                                                 .Order(),
+                () => Is.EqualTo(Enumerable.Range(1, 11).Cast<int?>()));
+        }
+
+        /// <param name="userBestTotalScore">The total score of the user's best.</param>
+        /// <param name="userBestId">The ID of the user's best.</param>
+        [TestCase(1000, 1000, Description = "user best is beyond the retrieved higher scores")]
+        [TestCase(0, 50, Description = "user best is lower than the presented score")]
+        public void TestUserBestNotDisplayedOutsideHigherScores(long userBestTotalScore, long userBestId)
+        {
+            AddStep("bind handler with user best", () => bindHandler(userScore: userScore, userBestScore: new MultiplayerScore
+            {
+                ID = userBestId,
+                TotalScore = userBestTotalScore,
+                Accuracy = userScore.Accuracy,
+                Passed = true,
+                Rank = userScore.Rank,
+                MaxCombo = userScore.MaxCombo,
+                BeatmapId = RNG.Next(0, 7),
+                User = userScore.User,
+            }));
+
+            createResultsWithScore(() => userScore);
+            waitForDisplay();
+
+            AddAssert("user best not displayed", () => this.ChildrenOfType<ScorePanel>().Any(p => p.Score.OnlineID == userBestId), () => Is.False);
+            AddAssert("higher positions unaffected", () => this.ChildrenOfType<ScorePanel>()
+                                                               .Where(p => p.Score.OnlineID <= 0)
+                                                               .All(p => p.ScorePosition.Value == real_user_position - 1 + p.Score.OnlineID));
+        }
+
         private void createResultsWithScore(Func<ScoreInfo> getScore)
         {
             AddStep("load results", () =>
@@ -334,7 +411,10 @@ namespace osu.Game.Tests.Visual.Playlists
             AddWaitStep("wait for display", 5);
         }
 
-        private void bindHandler(bool delayed = false, ScoreInfo? userScore = null, bool failRequests = false, bool noScores = false) => ((DummyAPIAccess)API).HandleRequest = request =>
+        /// <param name="userBestScore">The best score of the user to return when <see cref="TestScoreResultsScreen"/> requests it. Defaults to <paramref name="userScore"/>.</param>
+        /// <param name="modifyUserResponse">Applies modifications to the response containing <paramref name="userScore"/> and the scores around it.</param>
+        private void bindHandler(bool delayed = false, ScoreInfo? userScore = null, bool failRequests = false, bool noScores = false, MultiplayerScore? userBestScore = null,
+                                 Action<MultiplayerScore>? modifyUserResponse = null) => ((DummyAPIAccess)API).HandleRequest = request =>
         {
             // pre-check for requests we should be handling (as they are scheduled below).
             switch (request)
@@ -385,7 +465,21 @@ namespace osu.Game.Tests.Visual.Playlists
                         if (userScore == null || userScore.OnlineID == -1)
                             triggerFail(s);
                         else
-                            triggerSuccess(s, () => createUserResponse(userScore));
+                            triggerSuccess(s, () =>
+                            {
+                                var response = createUserResponse(userScore);
+                                modifyUserResponse?.Invoke(response);
+                                return response;
+                            });
+
+                        break;
+
+                    // The user best results screen presents the user's best score directly, so is handled by the general case below.
+                    case ShowPlaylistUserScoreRequest u when resultsScreen is TestScoreResultsScreen:
+                        if (userScore == null || userScore.OnlineID == -1)
+                            triggerFail(u);
+                        else
+                            triggerSuccess(u, () => userBestScore ?? createUserBestResponse(userScore));
 
                         break;
 
@@ -465,6 +559,14 @@ namespace osu.Game.Tests.Visual.Playlists
             addCursor(multiplayerUserScore.ScoresAround!.Lower!);
             addCursor(multiplayerUserScore.ScoresAround!.Higher!);
 
+            return multiplayerUserScore;
+        }
+
+        private MultiplayerScore createUserBestResponse(ScoreInfo userScore)
+        {
+            var multiplayerUserScore = createMultiplayerUserScore(userScore);
+            multiplayerUserScore.ID = userScore.OnlineID;
+            multiplayerUserScore.ScoresAround = null;
             return multiplayerUserScore;
         }
 

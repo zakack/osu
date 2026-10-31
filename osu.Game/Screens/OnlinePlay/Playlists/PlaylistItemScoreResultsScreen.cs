@@ -44,6 +44,8 @@ namespace osu.Game.Screens.OnlinePlay.Playlists
 
         protected override APIRequest<MultiplayerScore> CreateScoreRequest() => new ShowPlaylistScoreRequest(RoomId, PlaylistItem.ID, scoreId);
 
+        protected override APIRequest<MultiplayerScore> CreateUserBestScoreRequest(MultiplayerScore score) => new ShowPlaylistUserScoreRequest(RoomId, PlaylistItem.ID, score.User.Id);
+
         protected override void OnScoresAdded(ScoreInfo[] scores)
         {
             base.OnScoresAdded(scores);
